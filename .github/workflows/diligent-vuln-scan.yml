@@ -1,0 +1,119 @@
+# Diligent fork-only workflow — DO NOT upstream.
+#
+# Option B "early-warning radar": runs govulncheck + gosec against the
+# UPSTREAM Bifrost source as it sits on this branch, on a schedule. Its only
+# job is to surface "upstream got riskier" before we decide to bump the pin in
+# the (private) llm-proxy repo.
+#
+# Deliberately scoped for a PUBLIC mirror:
+#   - scans upstream source ONLY — no llm-proxy plugins, no built binary
+#   - applies NO suppression list (the .govulncheck-ignore.yaml judgment lives
+#     in the private llm-proxy repo — exposing it here would disclose which
+#     CVEs we accept in production)
+#   - references NO deployed commit/tag, uses NO secrets
+#   - nothing downstream consumes its output; llm-proxy runs its own gate
+#
+# This file lives only on the fork's workflow branch and is never merged into
+# `dev`, so it cannot conflict with an upstream fast-forward.
+name: "Diligent: upstream vuln scan (informational)"
+
+on:
+  push:
+    branches: ["main"]
+  schedule:
+    # Weekly, Monday 08:00 UTC. The code is unchanged between syncs; this picks
+    # up newly-published advisories against the version we mirror.
+    - cron: "0 8 * * 1"
+  workflow_dispatch:
+
+# Read-only. This workflow must never need a secret.
+permissions:
+  contents: read
+
+concurrency:
+  group: diligent-vuln-scan-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  govulncheck:
+    name: govulncheck (upstream source)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            github.com:443
+            api.github.com:443
+            objects.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
+            dl.google.com:443
+            proxy.golang.org:443
+            sum.golang.org:443
+            storage.googleapis.com:443
+            vuln.go.dev:443
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          # Match the upstream go directive (core/framework/transports go.mod).
+          go-version: "1.26.3"
+
+      - name: Set up Go workspace
+        # Resolves core/framework/plugins from local source so transports'
+        # reachability analysis matches the monorepo layout.
+        run: make setup-workspace
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.3.0
+
+      - name: Run govulncheck on deployable transport
+        # Source mode from the transports module = reachability-accurate for the
+        # bifrost-http binary we actually deploy. No suppression applied: a
+        # non-green result here is the early-warning signal, not a gate.
+        working-directory: transports
+        run: govulncheck ./...
+
+  gosec:
+    name: gosec (upstream source SAST)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            github.com:443
+            api.github.com:443
+            objects.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
+            dl.google.com:443
+            proxy.golang.org:443
+            sum.golang.org:443
+            storage.googleapis.com:443
+            raw.githubusercontent.com:443
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version: "1.26.3"
+
+      - name: Install gosec
+        run: go install github.com/securego/gosec/v2/cmd/gosec@v2.25.0
+
+      - name: Run gosec
+        # Same exclusions/thresholds llm-proxy uses, kept in sync by hand. This
+        # is informational; llm-proxy's gosec pass over source + plugins is the
+        # authoritative one.
+        run: gosec -exclude=G107,G114,G104,G304,G301 -severity medium -confidence high -quiet ./...
