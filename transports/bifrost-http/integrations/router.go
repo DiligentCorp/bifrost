@@ -2664,7 +2664,16 @@ func (g *GenericRouter) handleStreaming(ctx *fasthttp.RequestCtx, bifrostCtx *sc
 
 	// Use SSEStreamReader to bypass fasthttp's internal pipe (fasthttputil.PipeConns)
 	// which batches multiple SSE events into single TCP segments.
-	reader := lib.NewSSEStreamReader()
+	//
+	// Keepalives (when configured) keep idle streams alive through idle-timeout
+	// enforcing intermediaries. They are only enabled for text/event-stream: the
+	// Bedrock path emits a binary AWS EventStream where an SSE comment frame would
+	// corrupt the wire framing, so it is left without keepalives.
+	var keepaliveOpts []lib.SSEStreamReaderOption
+	if config.Type != RouteConfigTypeBedrock {
+		keepaliveOpts = lib.KeepaliveOptions(g.handlerStore.GetStreamKeepaliveIntervalSeconds())
+	}
+	reader := lib.NewSSEStreamReader(keepaliveOpts...)
 	ctx.Response.SetBodyStream(reader, -1)
 
 	// Producer goroutine: processes the stream channel, formats events, sends to reader

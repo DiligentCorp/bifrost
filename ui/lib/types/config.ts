@@ -574,6 +574,7 @@ export interface CoreConfig {
 	allowed_origins: string[];
 	allowed_headers: string[];
 	max_request_body_size_mb: number;
+	stream_keepalive_interval_seconds: number;
 	compat: CompatConfig;
 	mcp_agent_depth: number;
 	mcp_tool_execution_timeout: number;

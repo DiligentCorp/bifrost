@@ -84,6 +84,7 @@ type ClientConfig struct {
 	AllowedOrigins                        []string                         `json:"allowed_origins,omitempty"`            // Additional allowed origins for CORS and WebSocket (localhost is always allowed)
 	AllowedHeaders                        []string                         `json:"allowed_headers,omitempty"`            // Additional allowed headers for CORS and WebSocket
 	MaxRequestBodySizeMB                  int                              `json:"max_request_body_size_mb"`             // The maximum request body size in MB
+	StreamKeepaliveIntervalSeconds        int                              `json:"stream_keepalive_interval_seconds"`    // Interval in seconds between SSE keepalive frames on idle streams (0 = disabled). Keeps long-idle streams alive through idle-timeout enforcing intermediaries (load balancers, reverse proxies).
 	Compat                                CompatConfig                     `json:"compat"`                               // Compat plugin configuration
 	MCPAgentDepth                         int                              `json:"mcp_agent_depth"`                      // The maximum depth for MCP agent mode tool execution
 	MCPToolExecutionTimeout               int                              `json:"mcp_tool_execution_timeout"`           // The timeout for individual tool execution in seconds
@@ -245,6 +246,11 @@ func (c *ClientConfig) GenerateClientConfigHash() (string, error) {
 		hash.Write([]byte("asyncJobResultTTL:" + strconv.Itoa(c.AsyncJobResultTTL)))
 	} else {
 		hash.Write([]byte("asyncJobResultTTL:0"))
+	}
+
+	// Only hash non-default (non-zero) value to avoid legacy config hash churn on upgrade.
+	if c.StreamKeepaliveIntervalSeconds > 0 {
+		hash.Write([]byte("streamKeepaliveIntervalSeconds:" + strconv.Itoa(c.StreamKeepaliveIntervalSeconds)))
 	}
 
 	// Only hash non-default value to avoid legacy config hash churn on upgrade.

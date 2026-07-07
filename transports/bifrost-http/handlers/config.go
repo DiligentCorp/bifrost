@@ -586,6 +586,13 @@ func (h *ConfigHandler) updateConfig(ctx *fasthttp.RequestCtx) {
 		updatedConfig.RoutingChainMaxDepth = payload.ClientConfig.RoutingChainMaxDepth
 	}
 
+	// No restart needed - each SSE stream reads the interval when it starts.
+	// Only update when explicitly provided (> 0) so partial payloads do not clear
+	// a stored value; set it via config.json to disable (0).
+	if payload.ClientConfig.StreamKeepaliveIntervalSeconds > 0 {
+		updatedConfig.StreamKeepaliveIntervalSeconds = payload.ClientConfig.StreamKeepaliveIntervalSeconds
+	}
+
 	// Update external base URL for OAuth client redirect_uri (nil clears the override).
 	// Validation is performed up front in this handler so a failure here cannot leave the process in a partial state.
 	updatedConfig.MCPExternalClientURL = payload.ClientConfig.MCPExternalClientURL

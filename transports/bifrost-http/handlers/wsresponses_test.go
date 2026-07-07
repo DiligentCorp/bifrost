@@ -36,6 +36,10 @@ func (s testWSHandlerStore) GetAsyncJobResultTTL() int {
 	return 0
 }
 
+func (s testWSHandlerStore) GetStreamKeepaliveIntervalSeconds() int {
+	return 0
+}
+
 func (s testWSHandlerStore) GetKVStore() *kvstore.Store {
 	return nil
 }

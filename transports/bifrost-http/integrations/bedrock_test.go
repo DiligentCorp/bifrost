@@ -47,6 +47,10 @@ func (m *mockHandlerStore) GetAsyncJobResultTTL() int {
 	return 3600
 }
 
+func (m *mockHandlerStore) GetStreamKeepaliveIntervalSeconds() int {
+	return 0
+}
+
 func (m *mockHandlerStore) GetKVStore() *kvstore.Store {
 	return nil
 }

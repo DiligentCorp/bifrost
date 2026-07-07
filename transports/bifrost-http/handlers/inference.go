@@ -1912,7 +1912,9 @@ func (h *CompletionHandler) handleStreamingResponse(ctx *fasthttp.RequestCtx, bi
 	// Use SSEStreamReader to bypass fasthttp's internal pipe (fasthttputil.PipeConns)
 	// which batches multiple SSE events into single TCP segments.
 	// Each event is delivered individually via a channel, ensuring one HTTP chunk per event.
-	reader := lib.NewSSEStreamReader()
+	// Keepalives (when configured) keep idle streams alive through idle-timeout
+	// enforcing intermediaries such as load balancers and reverse proxies.
+	reader := lib.NewSSEStreamReader(lib.KeepaliveOptions(h.config.GetStreamKeepaliveIntervalSeconds())...)
 	ctx.Response.SetBodyStream(reader, -1)
 
 	// Producer goroutine: processes the stream channel, formats SSE events, sends to reader
