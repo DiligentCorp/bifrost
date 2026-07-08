@@ -1,0 +1,1 @@
+- feat: bound the first-chunk error peek with an optional per-request timeout so a transport keeping a connection warm during a slow first token (e.g. SSE keepalives) can commit the stream instead of blocking indefinitely; unset preserves full retry-on-first-chunk-error behavior (#5010)

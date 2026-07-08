@@ -29,6 +29,7 @@ type mockHandlerStore struct {
 	availableProviders         []schemas.ModelProvider
 	mcpHeaderCombinedAllowlist schemas.WhiteList
 	modelCatalog               *modelcatalog.ModelCatalog
+	streamKeepaliveIntervalS   int
 }
 
 func (m *mockHandlerStore) GetHeaderMatcher() *lib.HeaderMatcher {
@@ -48,7 +49,7 @@ func (m *mockHandlerStore) GetAsyncJobResultTTL() int {
 }
 
 func (m *mockHandlerStore) GetStreamKeepaliveIntervalSeconds() int {
-	return 0
+	return m.streamKeepaliveIntervalS
 }
 
 func (m *mockHandlerStore) GetKVStore() *kvstore.Store {

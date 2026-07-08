@@ -20,7 +20,7 @@ func TestCheckFirstStreamChunk_ErrorInFirstChunk(t *testing.T) {
 	}
 	close(stream)
 
-	_, drainDone, err := CheckFirstStreamChunkForError(context.Background(), stream)
+	_, drainDone, err := CheckFirstStreamChunkForError(context.Background(), stream, 0)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -49,7 +49,7 @@ func TestCheckFirstStreamChunk_ValidFirstChunk(t *testing.T) {
 	stream <- chunk2
 	close(stream)
 
-	wrapped, _, err := CheckFirstStreamChunkForError(context.Background(), stream)
+	wrapped, _, err := CheckFirstStreamChunkForError(context.Background(), stream, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestCheckFirstStreamChunk_EmptyStream(t *testing.T) {
 	stream := make(chan *schemas.BifrostStreamChunk)
 	close(stream)
 
-	wrapped, drainDone, err := CheckFirstStreamChunkForError(context.Background(), stream)
+	wrapped, drainDone, err := CheckFirstStreamChunkForError(context.Background(), stream, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestCheckFirstStreamChunk_ErrorInSecondChunk(t *testing.T) {
 	close(stream)
 
 	// Should NOT return error — only first chunk matters for retry
-	wrapped, _, err := CheckFirstStreamChunkForError(context.Background(), stream)
+	wrapped, _, err := CheckFirstStreamChunkForError(context.Background(), stream, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestCheckFirstStreamChunk_ErrorDrainsSource(t *testing.T) {
 	}
 	close(stream)
 
-	_, drainDone, err := CheckFirstStreamChunkForError(context.Background(), stream)
+	_, drainDone, err := CheckFirstStreamChunkForError(context.Background(), stream, 0)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -178,7 +178,7 @@ func TestCheckFirstStreamChunk_ErrorWithEmptyMessage(t *testing.T) {
 	}
 	close(stream)
 
-	wrapped, _, err := CheckFirstStreamChunkForError(context.Background(), stream)
+	wrapped, _, err := CheckFirstStreamChunkForError(context.Background(), stream, 0)
 	if err != nil {
 		t.Fatalf("unexpected error for empty message: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestCheckFirstStreamChunk_CtxCancelUnblocksWrapper(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	wrapped, drainDone, err := CheckFirstStreamChunkForError(ctx, src)
+	wrapped, drainDone, err := CheckFirstStreamChunkForError(ctx, src, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -226,6 +226,41 @@ func TestCheckFirstStreamChunk_CtxCancelUnblocksWrapper(t *testing.T) {
 	case <-drainDone:
 	case <-time.After(time.Second):
 		t.Fatal("drainDone did not close after ctx cancel; forwarder goroutine leaked")
+	}
+}
+
+// --- First-chunk timeout context accessors ------------------------------------
+
+func TestFirstChunkTimeout_UnsetReturnsZero(t *testing.T) {
+	ctx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+	if got := GetFirstChunkTimeout(ctx); got != 0 {
+		t.Errorf("unset timeout should be 0 (unbounded), got %v", got)
+	}
+}
+
+func TestFirstChunkTimeout_SetThenGet(t *testing.T) {
+	ctx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+	SetFirstChunkTimeoutIfEmpty(ctx, 15*time.Second)
+	if got := GetFirstChunkTimeout(ctx); got != 15*time.Second {
+		t.Errorf("got %v, want 15s", got)
+	}
+}
+
+func TestFirstChunkTimeout_RespectsExistingValue(t *testing.T) {
+	ctx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+	SetFirstChunkTimeoutIfEmpty(ctx, 30*time.Second) // e.g. an upstream/header value
+	SetFirstChunkTimeoutIfEmpty(ctx, 15*time.Second) // must not overwrite
+	if got := GetFirstChunkTimeout(ctx); got != 30*time.Second {
+		t.Errorf("existing value must win: got %v, want 30s", got)
+	}
+}
+
+func TestFirstChunkTimeout_NonPositiveIgnored(t *testing.T) {
+	ctx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+	SetFirstChunkTimeoutIfEmpty(ctx, 0)
+	SetFirstChunkTimeoutIfEmpty(ctx, -5*time.Second)
+	if got := GetFirstChunkTimeout(ctx); got != 0 {
+		t.Errorf("non-positive timeout must leave it unset (0), got %v", got)
 	}
 }
 
@@ -306,12 +341,192 @@ func TestCheckFirstStreamChunk_CodeOnlyError(t *testing.T) {
 	}
 	close(stream)
 
-	_, drainDone, err := CheckFirstStreamChunkForError(context.Background(), stream)
+	_, drainDone, err := CheckFirstStreamChunkForError(context.Background(), stream, 0)
 	if err == nil {
 		t.Fatal("expected error for code-only error, got nil")
 	}
 	<-drainDone
 	if err.Error.Code == nil || *err.Error.Code != "limit_burst_rate" {
 		t.Errorf("unexpected error code: %v", err.Error.Code)
+	}
+}
+
+// --- Bounded first-chunk peek (liveness timeout) ------------------------------
+//
+// These verify the firstChunkTimeout branch: when a caller supplies a positive
+// deadline (a transport that must keep the connection warm during a slow first
+// token), the peek must not block past it. The un-timed behavior is covered by
+// every test above passing 0.
+
+// TestCheckFirstStreamChunk_TimeoutForwardsPendingFirstChunk verifies that when the
+// deadline elapses before the first chunk arrives, the stream is committed and the
+// still-pending first chunk (and everything after) is forwarded verbatim — nothing
+// is dropped and no error/retry is produced.
+func TestCheckFirstStreamChunk_TimeoutForwardsPendingFirstChunk(t *testing.T) {
+	stream := make(chan *schemas.BifrostStreamChunk, 2)
+
+	wrapped, drainDone, err := CheckFirstStreamChunkForError(context.Background(), stream, 20*time.Millisecond)
+	if err != nil {
+		t.Fatalf("timeout must not surface an error (retry is impossible post-commit): %v", err)
+	}
+	if wrapped == nil {
+		t.Fatal("expected a forwarding channel on timeout, got nil")
+	}
+
+	// The first chunk arrives only after the deadline — simulating a slow first token.
+	stream <- &schemas.BifrostStreamChunk{BifrostChatResponse: &schemas.BifrostChatResponse{ID: "late-first"}}
+	stream <- &schemas.BifrostStreamChunk{BifrostChatResponse: &schemas.BifrostChatResponse{ID: "second"}}
+	close(stream)
+
+	got1 := <-wrapped
+	if got1.BifrostChatResponse == nil || got1.BifrostChatResponse.ID != "late-first" {
+		t.Errorf("late first chunk not forwarded verbatim: %+v", got1)
+	}
+	got2 := <-wrapped
+	if got2.BifrostChatResponse == nil || got2.BifrostChatResponse.ID != "second" {
+		t.Errorf("second chunk not forwarded: %+v", got2)
+	}
+	if _, ok := <-wrapped; ok {
+		t.Error("expected wrapped channel to close after source drains")
+	}
+	<-drainDone
+}
+
+// TestCheckFirstStreamChunk_TimeoutThenErrorDeliveredInBand verifies that once the
+// deadline commits the stream, a first chunk that turns out to be an error is
+// delivered in-band as a normal chunk — NOT surfaced for retry (which is no longer
+// possible after the response is committed).
+func TestCheckFirstStreamChunk_TimeoutThenErrorDeliveredInBand(t *testing.T) {
+	stream := make(chan *schemas.BifrostStreamChunk, 1)
+
+	wrapped, drainDone, err := CheckFirstStreamChunkForError(context.Background(), stream, 20*time.Millisecond)
+	if err != nil {
+		t.Fatalf("timeout path must not return a retryable error: %v", err)
+	}
+	if wrapped == nil {
+		t.Fatal("expected a forwarding channel, got nil")
+	}
+
+	// After the deadline, the (late) first chunk is an error.
+	stream <- &schemas.BifrostStreamChunk{
+		BifrostError: &schemas.BifrostError{Error: &schemas.ErrorField{Message: "late upstream error"}},
+	}
+	close(stream)
+
+	got := <-wrapped
+	if got.BifrostError == nil || got.BifrostError.Error.Message != "late upstream error" {
+		t.Errorf("post-commit error must be forwarded in-band, got %+v", got)
+	}
+	if _, ok := <-wrapped; ok {
+		t.Error("expected wrapped channel to close")
+	}
+	<-drainDone
+}
+
+// TestCheckFirstStreamChunk_FastErrorStillCaughtUnderTimeout verifies that a
+// generous deadline does not weaken error detection: an embedded error that arrives
+// before the deadline is still returned for retry, exactly as with no timeout. This
+// is the case the whole feature must preserve.
+func TestCheckFirstStreamChunk_FastErrorStillCaughtUnderTimeout(t *testing.T) {
+	stream := make(chan *schemas.BifrostStreamChunk, 2)
+	stream <- &schemas.BifrostStreamChunk{
+		BifrostError: &schemas.BifrostError{Error: &schemas.ErrorField{
+			Code:    schemas.Ptr("limit_burst_rate"),
+			Message: "Request rate increased too quickly",
+		}},
+	}
+	close(stream)
+
+	// A large deadline; the error is already queued, so the peek returns immediately.
+	_, drainDone, err := CheckFirstStreamChunkForError(context.Background(), stream, 10*time.Second)
+	if err == nil {
+		t.Fatal("a fast embedded error must still be caught for retry even with a timeout set")
+	}
+	<-drainDone
+	if err.Error.Code == nil || *err.Error.Code != "limit_burst_rate" {
+		t.Errorf("unexpected error code: %v", err.Error.Code)
+	}
+}
+
+// TestCheckFirstStreamChunk_FastDataUnderTimeoutBehavesAsUntimed verifies that a
+// valid first chunk arriving before the deadline takes the normal re-inject path.
+func TestCheckFirstStreamChunk_FastDataUnderTimeoutBehavesAsUntimed(t *testing.T) {
+	stream := make(chan *schemas.BifrostStreamChunk, 2)
+	stream <- &schemas.BifrostStreamChunk{BifrostChatResponse: &schemas.BifrostChatResponse{ID: "fast"}}
+	stream <- &schemas.BifrostStreamChunk{BifrostChatResponse: &schemas.BifrostChatResponse{ID: "next"}}
+	close(stream)
+
+	wrapped, drainDone, err := CheckFirstStreamChunkForError(context.Background(), stream, 10*time.Second)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got1 := <-wrapped
+	if got1.BifrostChatResponse == nil || got1.BifrostChatResponse.ID != "fast" {
+		t.Errorf("first chunk not re-injected: %+v", got1)
+	}
+	got2 := <-wrapped
+	if got2.BifrostChatResponse == nil || got2.BifrostChatResponse.ID != "next" {
+		t.Errorf("second chunk not forwarded: %+v", got2)
+	}
+	if _, ok := <-wrapped; ok {
+		t.Error("expected wrapped channel to close")
+	}
+	<-drainDone
+}
+
+// TestCheckFirstStreamChunk_TimeoutEmptyStreamCloses verifies that a source which
+// closes without ever producing a chunk terminates the forwarding channel cleanly
+// even when a deadline is set.
+func TestCheckFirstStreamChunk_TimeoutEmptyStreamCloses(t *testing.T) {
+	stream := make(chan *schemas.BifrostStreamChunk, 1)
+
+	wrapped, drainDone, err := CheckFirstStreamChunkForError(context.Background(), stream, 20*time.Millisecond)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if wrapped == nil {
+		t.Fatal("expected a forwarding channel on timeout, got nil")
+	}
+
+	// Deadline elapses, then the producer closes without emitting anything.
+	close(stream)
+
+	if _, ok := <-wrapped; ok {
+		t.Error("expected wrapped channel to close for an empty stream")
+	}
+	select {
+	case <-drainDone:
+	case <-time.After(time.Second):
+		t.Fatal("drainDone did not close; forwarder goroutine leaked")
+	}
+}
+
+// TestCheckFirstStreamChunk_TimeoutCtxCancelDrains verifies the abandon path on the
+// timeout branch: if the consumer stops reading the forwarding channel, ctx cancel
+// makes the forwarder drain the source so the provider goroutine can exit.
+func TestCheckFirstStreamChunk_TimeoutCtxCancelDrains(t *testing.T) {
+	src := make(chan *schemas.BifrostStreamChunk, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	wrapped, drainDone, err := CheckFirstStreamChunkForError(ctx, src, 20*time.Millisecond)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if wrapped == nil {
+		t.Fatal("expected a forwarding channel, got nil")
+	}
+
+	// After the deadline, fill the pipeline so the forwarder blocks on send into
+	// the unread (cap-1, soon full) wrapped channel.
+	src <- &schemas.BifrostStreamChunk{BifrostChatResponse: &schemas.BifrostChatResponse{ID: "1"}}
+	src <- &schemas.BifrostStreamChunk{BifrostChatResponse: &schemas.BifrostChatResponse{ID: "2"}}
+	cancel()
+	src <- &schemas.BifrostStreamChunk{BifrostChatResponse: &schemas.BifrostChatResponse{ID: "3"}}
+	close(src)
+
+	select {
+	case <-drainDone:
+	case <-time.After(time.Second):
+		t.Fatal("drainDone did not close after ctx cancel; forwarder goroutine leaked")
 	}
 }

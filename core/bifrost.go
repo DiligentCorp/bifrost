@@ -6094,7 +6094,12 @@ func executeRequestWithRetries[T any](
 		// the SSE stream instead of returning proper HTTP error status codes.
 		if bifrostError == nil {
 			if streamChan, ok := any(result).(chan *schemas.BifrostStreamChunk); ok {
-				checkedStream, drainDone, firstChunkErr := providerUtils.CheckFirstStreamChunkForError(ctx, streamChan)
+				// firstChunkTimeout bounds this peek so a transport that must keep the
+				// connection warm during a slow first token (e.g. one emitting SSE
+				// keepalive frames) can commit the response instead of blocking here
+				// indefinitely. Unset (0) => wait unbounded, preserving full
+				// retry-on-first-chunk-error semantics for callers with no liveness deadline.
+				checkedStream, drainDone, firstChunkErr := providerUtils.CheckFirstStreamChunkForError(ctx, streamChan, providerUtils.GetFirstChunkTimeout(ctx))
 				if firstChunkErr != nil {
 					<-drainDone
 					// The dead stream's teardown (ReleaseStreamingResponse) claimed the

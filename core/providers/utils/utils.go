@@ -2354,6 +2354,33 @@ func GetStreamIdleTimeout(ctx *schemas.BifrostContext) time.Duration {
 	return DefaultStreamIdleTimeout
 }
 
+// SetFirstChunkTimeoutIfEmpty records, on the context, the maximum time the
+// first-chunk error peek (CheckFirstStreamChunkForError) may block before the
+// stream must be committed to the client. A transport sets this when it has to
+// keep the connection warm during a slow first token — e.g. it emits SSE
+// keepalive frames, which require the response to be committed. An existing
+// value (set upstream, e.g. from a header) is respected. A non-positive
+// duration is ignored, leaving the peek unbounded.
+func SetFirstChunkTimeoutIfEmpty(ctx *schemas.BifrostContext, timeout time.Duration) {
+	if existing, ok := ctx.Value(schemas.BifrostContextKeyFirstChunkTimeout).(time.Duration); ok && existing > 0 {
+		return // already set from upstream (transport/header), respect it
+	}
+	if timeout > 0 {
+		ctx.SetValue(schemas.BifrostContextKeyFirstChunkTimeout, timeout)
+	}
+}
+
+// GetFirstChunkTimeout reads the first-chunk peek timeout from context. It
+// returns 0 when unset, which callers treat as "wait unbounded" — preserving
+// the default retry-on-first-chunk-error behavior for consumers that have no
+// liveness deadline (direct SDK use, non-streaming intermediaries).
+func GetFirstChunkTimeout(ctx *schemas.BifrostContext) time.Duration {
+	if timeout, ok := ctx.Value(schemas.BifrostContextKeyFirstChunkTimeout).(time.Duration); ok && timeout > 0 {
+		return timeout
+	}
+	return 0
+}
+
 // streamCloserWithError is implemented by fasthttp's streaming body reader.
 // Calling CloseWithError with a non-nil error closes the underlying TCP
 // connection, interrupting any blocked Read.

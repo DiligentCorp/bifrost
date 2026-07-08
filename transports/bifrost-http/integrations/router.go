@@ -57,12 +57,14 @@ import (
 	"mime/multipart"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream"
 	"github.com/bytedance/sonic"
 	"github.com/fasthttp/router"
 	bifrost "github.com/maximhq/bifrost/core"
 	"github.com/maximhq/bifrost/core/providers/bedrock"
+	providerUtils "github.com/maximhq/bifrost/core/providers/utils"
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/logstore"
 	"github.com/maximhq/bifrost/framework/modelcatalog"
@@ -2511,6 +2513,15 @@ func (g *GenericRouter) handleStreamingRequest(ctx *fasthttp.RequestCtx, config 
 	// We now get a cancellable context from ConvertToBifrostContext so we can cancel the upstream stream immediately when the client disconnects.
 	var stream chan *schemas.BifrostStreamChunk
 	var bifrostErr *schemas.BifrostError
+
+	// When keepalives are enabled, bound core's first-chunk error peek at the keepalive
+	// interval so a slow first token doesn't block the response from committing — a
+	// keepalive is a body frame and cannot be sent before commit. Fast embedded errors
+	// still arrive within the interval and are caught for retry. handleStreaming applies
+	// the matching keepalive to the reader once the stream is in hand.
+	if interval := g.handlerStore.GetStreamKeepaliveIntervalSeconds(); interval > 0 {
+		providerUtils.SetFirstChunkTimeoutIfEmpty(bifrostCtx, time.Duration(interval)*time.Second)
+	}
 
 	// Handle different request types
 	if bifrostReq.TextCompletionRequest != nil {
