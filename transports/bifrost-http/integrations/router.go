@@ -57,12 +57,14 @@ import (
 	"mime/multipart"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream"
 	"github.com/bytedance/sonic"
 	"github.com/fasthttp/router"
 	bifrost "github.com/maximhq/bifrost/core"
 	"github.com/maximhq/bifrost/core/providers/bedrock"
+	providerUtils "github.com/maximhq/bifrost/core/providers/utils"
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/logstore"
 	"github.com/maximhq/bifrost/framework/modelcatalog"
@@ -2512,6 +2514,15 @@ func (g *GenericRouter) handleStreamingRequest(ctx *fasthttp.RequestCtx, config 
 	var stream chan *schemas.BifrostStreamChunk
 	var bifrostErr *schemas.BifrostError
 
+	// When keepalives are enabled, bound core's first-chunk error peek at the keepalive
+	// interval so a slow first token doesn't block the response from committing — a
+	// keepalive is a body frame and cannot be sent before commit. Fast embedded errors
+	// still arrive within the interval and are caught for retry. handleStreaming applies
+	// the matching keepalive to the reader once the stream is in hand.
+	if interval := g.handlerStore.GetStreamKeepaliveIntervalSeconds(); interval > 0 {
+		providerUtils.SetFirstChunkTimeoutIfEmpty(bifrostCtx, time.Duration(interval)*time.Second)
+	}
+
 	// Handle different request types
 	if bifrostReq.TextCompletionRequest != nil {
 		stream, bifrostErr = g.client.TextCompletionStreamRequest(bifrostCtx, bifrostReq.TextCompletionRequest)
@@ -2664,7 +2675,18 @@ func (g *GenericRouter) handleStreaming(ctx *fasthttp.RequestCtx, bifrostCtx *sc
 
 	// Use SSEStreamReader to bypass fasthttp's internal pipe (fasthttputil.PipeConns)
 	// which batches multiple SSE events into single TCP segments.
-	reader := lib.NewSSEStreamReader()
+	//
+	// Keepalives (when configured) keep idle streams alive through idle-timeout
+	// enforcing intermediaries. Every streaming route gets them, but the frame differs
+	// by wire protocol: text/event-stream routes use the default ": keepalive" SSE
+	// comment, while the Bedrock path emits a binary AWS EventStream and so uses a
+	// pre-encoded EventStream keepalive message (bedrockKeepaliveFrame) that SDK
+	// decoders ignore — an SSE comment there would corrupt the framing.
+	keepaliveOpts := lib.KeepaliveOptions(g.handlerStore.GetStreamKeepaliveIntervalSeconds())
+	if config.Type == RouteConfigTypeBedrock && len(keepaliveOpts) > 0 {
+		keepaliveOpts = append(keepaliveOpts, lib.WithKeepaliveFrame(bedrockKeepaliveFrame))
+	}
+	reader := lib.NewSSEStreamReader(keepaliveOpts...)
 	ctx.Response.SetBodyStream(reader, -1)
 
 	// Producer goroutine: processes the stream channel, formats events, sends to reader
@@ -3021,6 +3043,41 @@ func sendBedrockEventStreamException(reader *lib.SSEStreamReader, encoder *event
 	return true
 }
 
+// bedrockKeepaliveFrame is a pre-encoded AWS EventStream keepalive message for the
+// Bedrock streaming path, where the default SSE ": keepalive" comment cannot be used
+// because it would corrupt the binary EventStream framing. It is a well-formed message
+// with :message-type "event" and a proprietary :event-type ("bifrost-ping") that is not
+// a member of any Bedrock response union, plus an empty payload. Per the Smithy event
+// stream spec ("clients SHOULD NOT fail when an unknown event is received") and the
+// behavior of every official SDK decoder, such a frame is ignored: botocore drops it
+// before it reaches the application, while aws-sdk-go-v2 and aws-sdk-js surface it as an
+// unmodeled union member that a default/else branch discards. The :event-type is
+// deliberately proprietary so it can never collide with a future AWS-modeled event.
+//
+// It is built once at init (the CRCs are fixed for a fixed message) and only ever read,
+// so the shared slice is safe. If encoding ever fails the frame is left empty, which
+// KeepaliveOptions/WithKeepaliveFrame treat as "no keepalive" — degrading to the pre-fix
+// behavior rather than emitting a corrupt frame.
+var bedrockKeepaliveFrame = buildBedrockKeepaliveFrame()
+
+func buildBedrockKeepaliveFrame() []byte {
+	msg := eventstream.Message{
+		Headers: eventstream.Headers{
+			{Name: ":message-type", Value: eventstream.StringValue("event")},
+			{Name: ":event-type", Value: eventstream.StringValue("bifrost-ping")},
+			{Name: ":content-type", Value: eventstream.StringValue("application/json")},
+		},
+		Payload: []byte("{}"),
+	}
+	var buf bytes.Buffer
+	if err := eventstream.NewEncoder().Encode(&buf, msg); err != nil {
+		// Encoding a fixed message cannot fail in practice; on the impossible error
+		// return nil so keepalives are simply disabled for the Bedrock path.
+		return nil
+	}
+	return buf.Bytes()
+}
+
 // extractPassthroughModel extracts the model from the passthrough request path and/or body.
 // Path patterns: models/{model}, models/{model}:suffix (GenAI), .../models/{model} (Vertex), tunedModels/{model}.
 // Body is pre-parsed by parsePassthroughBody to avoid redundant unmarshaling.
@@ -3283,8 +3340,18 @@ func (g *GenericRouter) handlePassthroughStream(
 		}
 	}
 
-	// Use SSEStreamReader to bypass fasthttp's internal pipe batching
-	reader := lib.NewSSEStreamReader()
+	// Use SSEStreamReader to bypass fasthttp's internal pipe batching.
+	//
+	// Keepalives (when configured) are only safe on genuine SSE passthrough streams:
+	// the ": keepalive" comment is valid inside text/event-stream but would corrupt a
+	// non-SSE passthrough body (e.g. Vertex/Gemini :streamGenerateContent without
+	// ?alt=sse returns an incrementally-delivered JSON array). Gate on the resolved
+	// upstream Content-Type so we never inject a comment into a JSON stream.
+	var keepaliveOpts []lib.SSEStreamReaderOption
+	if strings.HasPrefix(strings.ToLower(contentType), "text/event-stream") {
+		keepaliveOpts = lib.KeepaliveOptions(g.handlerStore.GetStreamKeepaliveIntervalSeconds())
+	}
+	reader := lib.NewSSEStreamReader(keepaliveOpts...)
 	ctx.Response.SetBodyStream(reader, -1)
 
 	go func() {

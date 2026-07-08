@@ -49,6 +49,15 @@ ClientConfig:
     max_request_body_size_mb:
       type: integer
       description: Maximum request body size in MB
+    stream_keepalive_interval_seconds:
+      type: integer
+      minimum: 0
+      default: 0
+      description: >-
+        Interval in seconds between SSE keepalive frames (a ": keepalive" comment)
+        emitted while a stream is idle. Keeps long-idle streams alive through
+        idle-timeout enforcing intermediaries such as load balancers and reverse
+        proxies. 0 disables keepalives (default).
     compat:
       type: object
       description: Compat plugin configuration

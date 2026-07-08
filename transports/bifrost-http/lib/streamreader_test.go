@@ -5,6 +5,7 @@ import (
 	"io"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestSSEStreamReaderSingleEventPerRead(t *testing.T) {
@@ -679,6 +680,132 @@ func TestSSEStreamReaderConcurrentSendEvent(t *testing.T) {
 
 	if count != numProducers*eventsPerProducer {
 		t.Errorf("got %d events, want %d", count, numProducers*eventsPerProducer)
+	}
+}
+
+// TestSSEStreamReaderKeepaliveDisabledByDefault verifies that without the
+// WithKeepalive option, Read blocks for a real event and never injects a frame.
+func TestSSEStreamReaderKeepaliveDisabledByDefault(t *testing.T) {
+	r := NewSSEStreamReader()
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		r.Send([]byte("data: real\n\n"))
+		r.Done()
+	}()
+
+	buf := make([]byte, 4096)
+	n, err := r.Read(buf)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := string(buf[:n]); got != "data: real\n\n" {
+		t.Errorf("got %q, want the real event (no keepalive should be injected)", got)
+	}
+}
+
+// TestSSEStreamReaderKeepaliveEmittedWhenIdle verifies that Read returns a
+// keepalive frame when the producer stays silent past the interval, and that a
+// subsequent real event is still delivered.
+func TestSSEStreamReaderKeepaliveEmittedWhenIdle(t *testing.T) {
+	r := NewSSEStreamReader(WithKeepalive(20 * time.Millisecond))
+
+	go func() {
+		// Stay silent well past the interval, then send a real event.
+		time.Sleep(80 * time.Millisecond)
+		r.Send([]byte("data: real\n\n"))
+		r.Done()
+	}()
+
+	buf := make([]byte, 4096)
+
+	// First read should be a keepalive frame (producer is still idle).
+	n, err := r.Read(buf)
+	if err != nil {
+		t.Fatalf("unexpected error on keepalive read: %v", err)
+	}
+	if got := string(buf[:n]); got != string(sseKeepaliveFrame) {
+		t.Fatalf("first read: got %q, want keepalive frame %q", got, sseKeepaliveFrame)
+	}
+
+	// Eventually the real event arrives; drain any further keepalives until then.
+	for {
+		n, err = r.Read(buf)
+		if err != nil {
+			t.Fatalf("unexpected error waiting for real event: %v", err)
+		}
+		got := string(buf[:n])
+		if got == string(sseKeepaliveFrame) {
+			continue
+		}
+		if got != "data: real\n\n" {
+			t.Fatalf("got %q, want the real event", got)
+		}
+		break
+	}
+}
+
+// TestSSEStreamReaderKeepaliveResetByRealEvent verifies that a steady stream of
+// real events keeps the keepalive timer from ever firing.
+func TestSSEStreamReaderKeepaliveResetByRealEvent(t *testing.T) {
+	r := NewSSEStreamReader(WithKeepalive(40 * time.Millisecond))
+
+	const numEvents = 5
+	go func() {
+		for i := 0; i < numEvents; i++ {
+			// Emit faster than the keepalive interval.
+			time.Sleep(10 * time.Millisecond)
+			r.Send([]byte(fmt.Sprintf("data: {\"i\":%d}\n\n", i)))
+		}
+		r.Done()
+	}()
+
+	buf := make([]byte, 4096)
+	for i := 0; i < numEvents; i++ {
+		n, err := r.Read(buf)
+		if err != nil {
+			t.Fatalf("event %d: unexpected error: %v", i, err)
+		}
+		if got := string(buf[:n]); got == string(sseKeepaliveFrame) {
+			t.Fatalf("event %d: unexpected keepalive frame while events flow steadily", i)
+		}
+	}
+
+	if n, err := r.Read(buf); err != io.EOF {
+		t.Errorf("expected EOF, got err=%v n=%d", err, n)
+	}
+}
+
+// TestSSEStreamReaderKeepaliveEOFOnDone verifies that Done still terminates the
+// stream cleanly when keepalives are enabled.
+func TestSSEStreamReaderKeepaliveEOFOnDone(t *testing.T) {
+	r := NewSSEStreamReader(WithKeepalive(20 * time.Millisecond))
+	r.Done()
+
+	buf := make([]byte, 4096)
+	if n, err := r.Read(buf); err != io.EOF {
+		t.Errorf("expected io.EOF, got err=%v n=%d", err, n)
+	}
+}
+
+// TestSSEStreamReaderKeepaliveCustomFrame verifies WithKeepaliveFrame overrides
+// the emitted bytes — used by the Bedrock binary EventStream path.
+func TestSSEStreamReaderKeepaliveCustomFrame(t *testing.T) {
+	custom := []byte{0x01, 0x02, 0x03}
+	r := NewSSEStreamReader(WithKeepalive(20*time.Millisecond), WithKeepaliveFrame(custom))
+
+	go func() {
+		time.Sleep(80 * time.Millisecond)
+		r.Done()
+	}()
+
+	buf := make([]byte, 4096)
+	n, err := r.Read(buf)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := buf[:n]; string(got) != string(custom) {
+		t.Errorf("got %v, want custom keepalive frame %v", got, custom)
 	}
 }
 

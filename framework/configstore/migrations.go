@@ -436,6 +436,7 @@ var configstoreMigrationSteps = []migrationStep{
 	{IDs: []string{"add_model_pricing_is_deprecated_column"}, run: migrationAddModelPricingIsDeprecatedColumn},
 	{IDs: []string{"add_mcp_client_tool_execution_timeout_column"}, run: migrationAddMCPClientToolExecutionTimeoutColumn},
 	{IDs: []string{"add_virtual_key_expires_at_column"}, run: migrationAddVirtualKeyExpiresAtColumn},
+	{IDs: []string{"add_stream_keepalive_interval_seconds_column"}, run: migrationAddStreamKeepaliveIntervalSecondsColumn},
 }
 
 // quoteSQLiteIdentifier quotes a SQLite identifier, escaping any double quotes.
@@ -10309,6 +10310,31 @@ func migrationAddVirtualKeyExpiresAtColumn(ctx context.Context, db *gorm.DB, log
 		Rollback: func(tx *gorm.DB) error {
 			tx = tx.WithContext(ctx)
 			return dropColumnIfExists(tx, logger, &tables.TableVirtualKey{}, "expires_at")
+		},
+	}})
+	if err := m.Migrate(); err != nil {
+		return fmt.Errorf("error running %s migration: %w", migrationName, err)
+	}
+	return nil
+}
+
+// migrationAddStreamKeepaliveIntervalSecondsColumn adds stream_keepalive_interval_seconds
+// to the client config table. Defaults to 0 (keepalives disabled), which preserves existing
+// behavior. The field is only hashed when > 0 (see GenerateClientConfigHash), so existing
+// client configs keep the same config_hash after upgrade — no hash recompute is needed.
+func migrationAddStreamKeepaliveIntervalSecondsColumn(ctx context.Context, db *gorm.DB, logger schemas.Logger) error {
+	migrationName := "add_stream_keepalive_interval_seconds_column"
+	logger.Info("[configstore] starting migration %s", migrationName)
+	defer logger.Info("[configstore] finished migration %s", migrationName)
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: migrationName,
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			return addColumnIfNotExists(tx, logger, &tables.TableClientConfig{}, "stream_keepalive_interval_seconds")
+		},
+		Rollback: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			return dropColumnIfExists(tx, logger, &tables.TableClientConfig{}, "stream_keepalive_interval_seconds")
 		},
 	}})
 	if err := m.Migrate(); err != nil {

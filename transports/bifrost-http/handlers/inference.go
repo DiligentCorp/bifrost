@@ -1867,6 +1867,17 @@ func (h *CompletionHandler) handleStreamingTranscriptionRequest(ctx *fasthttp.Re
 // Bifrost handles cleanup internally for normal completion and errors, so we only cancel
 // upstream streams when write errors indicate the client has disconnected.
 func (h *CompletionHandler) handleStreamingResponse(ctx *fasthttp.RequestCtx, bifrostCtx *schemas.BifrostContext, getStream func() (chan *schemas.BifrostStreamChunk, *schemas.BifrostError), cancel context.CancelFunc) {
+	// When keepalives are enabled we must commit the response and start emitting
+	// heartbeat frames even if the provider's first token is slow — a keepalive is a
+	// response-body frame, so it cannot be sent while core still holds the response
+	// uncommitted waiting to peek the first chunk for an embedded error. Bounding that
+	// peek at the keepalive interval lets the stream commit in time; fast embedded
+	// errors (which arrive well within the interval) are still caught and retried.
+	keepaliveInterval := h.config.GetStreamKeepaliveIntervalSeconds()
+	if keepaliveInterval > 0 {
+		providerUtils.SetFirstChunkTimeoutIfEmpty(bifrostCtx, time.Duration(keepaliveInterval)*time.Second)
+	}
+
 	// Get the streaming channel — called BEFORE setting SSE headers so that
 	// provider errors return proper HTTP status codes + JSON content type.
 	stream, bifrostErr := getStream()
@@ -1912,7 +1923,9 @@ func (h *CompletionHandler) handleStreamingResponse(ctx *fasthttp.RequestCtx, bi
 	// Use SSEStreamReader to bypass fasthttp's internal pipe (fasthttputil.PipeConns)
 	// which batches multiple SSE events into single TCP segments.
 	// Each event is delivered individually via a channel, ensuring one HTTP chunk per event.
-	reader := lib.NewSSEStreamReader()
+	// Keepalives (when configured) keep idle streams alive through idle-timeout
+	// enforcing intermediaries such as load balancers and reverse proxies.
+	reader := lib.NewSSEStreamReader(lib.KeepaliveOptions(keepaliveInterval)...)
 	ctx.Response.SetBodyStream(reader, -1)
 
 	// Producer goroutine: processes the stream channel, formats SSE events, sends to reader

@@ -133,6 +133,12 @@
           "minimum": 1,
           "description": "Maximum request body size in MB"
         },
+        "stream_keepalive_interval_seconds": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "Interval in seconds between SSE keepalive frames (a `: keepalive` comment) emitted while a stream is idle. Keeps long-idle streams alive through idle-timeout enforcing intermediaries such as load balancers and reverse proxies. 0 disables keepalives (default). Set comfortably below the smallest idle timeout on the path (Bifrost's stream_idle_timeout_in_seconds and every intermediary's connection idle timeout)."
+        },
         "compat": {
           "type": "object",
           "description": "Compat plugin configuration for request type conversion, parameter dropping, and parameter value conversion",

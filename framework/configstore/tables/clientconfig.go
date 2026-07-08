@@ -26,6 +26,7 @@ type TableClientConfig struct {
 	EnforceGovernanceHeader               bool   `gorm:"" json:"enforce_governance_header"`
 	EnforceSCIMAuth                       bool   `gorm:"default:false" json:"enforce_scim_auth"`
 	MaxRequestBodySizeMB                  int    `gorm:"default:100" json:"max_request_body_size_mb"`
+	StreamKeepaliveIntervalSeconds        int    `gorm:"default:0" json:"stream_keepalive_interval_seconds"` // Interval in seconds between SSE keepalive frames on idle streams (0 = disabled)
 	MCPAgentDepth                         int    `gorm:"default:10" json:"mcp_agent_depth"`
 	MCPToolExecutionTimeout               int    `gorm:"default:30" json:"mcp_tool_execution_timeout"`                    // Timeout for individual tool execution in seconds (default: 30)
 	MCPCodeModeBindingLevel               string `gorm:"default:server" json:"mcp_code_mode_binding_level"`               // How tools are exposed in VFS: "server" or "tool"
